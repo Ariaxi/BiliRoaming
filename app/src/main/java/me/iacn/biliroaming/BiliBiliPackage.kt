@@ -75,7 +75,7 @@ class BiliBiliPackage constructor(private val mClassLoader: ClassLoader, mContex
             ?: "tv.danmaku.bili.MainActivityV2" from mClassLoader
     }
     val mainActivityClass by Weak { "tv.danmaku.bili.MainActivityV2" from mClassLoader }
-    val homeUserCenterClass by Weak { mHookInfo.settings.homeUserCenter from mClassLoader }
+    val homeUserCenterClass by Weak { if (mHookInfo.settings.homeUserCenterCount == 1) mHookInfo.settings.homeUserCenterList.first().class_ from mClassLoader else null }
     val musicNotificationHelperClass by Weak { mHookInfo.musicNotification.helper from mClassLoader }
     val liveNotificationHelperClass by Weak { mHookInfo.musicNotification.liveHelper from mClassLoader }
     val notificationBuilderClass by Weak { mHookInfo.musicNotification.builder.class_ from mClassLoader }
@@ -121,6 +121,17 @@ class BiliBiliPackage constructor(private val mClassLoader: ClassLoader, mContex
     val toastHelperClass by Weak { mHookInfo.toastHelper.class_ from mClassLoader }
     val videoDetailCallbackClass by Weak { mHookInfo.videoDetailCallback from mClassLoader }
     val biliAccountsClass by Weak { mHookInfo.biliAccounts.class_ from mClassLoader }
+    val networkExceptionClass by Weak { "com.bilibili.lib.moss.api.NetworkException" from mClassLoader }
+    val brotliInputStreamClass by Weak { mHookInfo.brotliInputStream from mClassLoader }
+    val arcConfClass by Weak { "com.bapis.bilibili.app.playurl.v1.ArcConf" from mClassLoader }
+    val arcConfExtraContentClass by Weak { "com.bapis.bilibili.app.playurl.v1.ExtraContent" from mClassLoader }
+    val commentInvalidFragmentClass by Weak {
+        "com.bilibili.bangumi.ui.page.detail.BangumiCommentInvalidFragmentV2".from(mClassLoader)
+            ?: "com.bilibili.bangumi.ui.page.detail.OGVCommentFragment".from(mClassLoader)
+    }
+    val basicIndexItemClass by Weak { "com.bilibili.pegasus.api.model.BasicIndexItem" from mClassLoader }
+
+    val playerQualityServiceClass by Weak { "com.bilibili.playerbizcommon.features.quality.PlayerQualityService" from mClassLoader }
 
     val ids: Map<String, Int> by lazy {
         mHookInfo.mapIds.idsMap
@@ -157,7 +168,9 @@ class BiliBiliPackage constructor(private val mClassLoader: ClassLoader, mContex
 
     fun themeReset() = mHookInfo.themeProcessor.methodsList.map { it.orNull }
 
-    fun addSetting() = mHookInfo.settings.addSetting.orNull
+    fun homeCenters() = mHookInfo.settings.homeUserCenterList.map {
+        it.class_ from mClassLoader to it.addSetting.orNull
+    }
 
     fun requestField() = mHookInfo.okHttp.request.orNull
 
@@ -224,6 +237,12 @@ class BiliBiliPackage constructor(private val mClassLoader: ClassLoader, mContex
     fun showToast() = mHookInfo.toastHelper.show.orNull
 
     fun cancelShowToast() = mHookInfo.toastHelper.cancel.orNull
+
+    fun canTryWatchVipQuality() = mHookInfo.canTryWatchVipQuality.orNull
+
+    fun setInvalidTips() = commentInvalidFragmentClass?.declaredMethods?.find { m ->
+        m.parameterTypes.let { it.size == 2 && it[0] == commentInvalidFragmentClass && it[1].name == "kotlin.Pair" }
+    }?.name
 
     private fun readHookInfo(context: Context): Configs.HookInfo {
         try {
@@ -711,7 +730,7 @@ class BiliBiliPackage constructor(private val mClassLoader: ClassLoader, mContex
                 }
                 val contextIndex = dexHelper.encodeClassIndex(Context::class.java)
                 val listIndex = dexHelper.encodeClassIndex(List::class.java)
-                val homeUserCenterClass = dexHelper.findMethodUsingString(
+                dexHelper.findMethodUsingString(
                     "main.my-information.noportrait.0.show",
                     false,
                     -1,
@@ -721,40 +740,58 @@ class BiliBiliPackage constructor(private val mClassLoader: ClassLoader, mContex
                     null,
                     null,
                     null,
-                    true
-                ).asSequence().firstNotNullOfOrNull {
-                    dexHelper.decodeMethodIndex(it)
-                }?.declaringClass ?: return@settings
-                val homeUserCenterIndex = dexHelper.encodeClassIndex(homeUserCenterClass)
-                val addSettingMethod = dexHelper.findMethodUsingString(
-                    "activity://main/preference",
-                    true,
-                    -1,
-                    -1,
-                    null,
-                    homeUserCenterIndex,
-                    null,
-                    longArrayOf(contextIndex, listIndex),
-                    null,
-                    true
-                ).asSequence().firstNotNullOfOrNull {
-                    dexHelper.decodeMethodIndex(it)
-                } ?: dexHelper.findMethodUsingString(
-                    "bilibili://main/preference",
-                    true,
-                    -1,
-                    -1,
-                    null,
-                    homeUserCenterIndex,
-                    null,
-                    longArrayOf(contextIndex, listIndex),
-                    null,
-                    true
-                ).asSequence().firstNotNullOfOrNull {
-                    dexHelper.decodeMethodIndex(it)
-                } ?: return@settings
-                homeUserCenter = class_ { name = homeUserCenterClass.name }
-                addSetting = method { name = addSettingMethod.name }
+                    false
+                ).asSequence().mapNotNull { dexHelper.decodeMethodIndex(it)?.declaringClass }
+                    .forEach { homeUserCenterClass ->
+                        val homeUserCenterIndex = dexHelper.encodeClassIndex(homeUserCenterClass)
+                        val addSettingMethod = dexHelper.findMethodUsingString(
+                            "bilibili://main/scan",
+                            true,
+                            -1,
+                            -1,
+                            null,
+                            homeUserCenterIndex,
+                            null,
+                            longArrayOf(contextIndex),
+                            null,
+                            false
+                        ).asSequence().mapNotNull {
+                            dexHelper.decodeMethodIndex(it) as? Method
+                        }.firstOrNull {
+                            it.parameterTypes.size == 2 &&
+                                    it.parameterTypes[1] != List::class.java
+                        } ?: dexHelper.findMethodUsingString(
+                            "activity://main/preference",
+                            true,
+                            -1,
+                            -1,
+                            null,
+                            homeUserCenterIndex,
+                            null,
+                            longArrayOf(contextIndex, listIndex),
+                            null,
+                            true
+                        ).asSequence().firstNotNullOfOrNull {
+                            dexHelper.decodeMethodIndex(it)
+                        } ?: dexHelper.findMethodUsingString(
+                            "bilibili://main/preference",
+                            true,
+                            -1,
+                            -1,
+                            null,
+                            homeUserCenterIndex,
+                            null,
+                            longArrayOf(contextIndex, listIndex),
+                            null,
+                            true
+                        ).asSequence().firstNotNullOfOrNull {
+                            dexHelper.decodeMethodIndex(it)
+                        } ?: return@settings
+                        homeUserCenter += homeUserCenter {
+                            class_ = class_ { name = homeUserCenterClass.name }
+                            addSetting = method { name = addSettingMethod.name }
+                        }
+                    }
             }
             drawer = drawer {
                 val navigationViewClass =
@@ -1506,6 +1543,38 @@ class BiliBiliPackage constructor(private val mClassLoader: ClassLoader, mContex
                         it.isStatic && it.parameterTypes.isEmpty()
                     }?.name ?: return@method
                 }
+            }
+            brotliInputStream = class_ {
+                name = dexHelper.findMethodUsingString(
+                    "Brotli decoder initialization failed",
+                    false,
+                    -1,
+                    -1,
+                    null,
+                    -1,
+                    null,
+                    null,
+                    null,
+                    true
+                ).asSequence().firstNotNullOfOrNull {
+                    dexHelper.decodeMethodIndex(it)
+                }?.declaringClass?.name ?: return@class_
+            }
+            canTryWatchVipQuality = method {
+                name = dexHelper.findMethodUsingString(
+                    "user is vip, cannot trywatch",
+                    false,
+                    dexHelper.encodeClassIndex(Boolean::class.java),
+                    -1,
+                    null,
+                    -1,
+                    null,
+                    null,
+                    null,
+                    true
+                ).firstOrNull()?.let {
+                    dexHelper.decodeMethodIndex(it)
+                }?.name ?: return@method
             }
 
             dexHelper.close()

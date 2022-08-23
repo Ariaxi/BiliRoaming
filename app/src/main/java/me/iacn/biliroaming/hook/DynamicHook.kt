@@ -6,90 +6,147 @@ class DynamicHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private val purifyTypes by lazy {
         sPrefs.getStringSet("customize_dynamic_type", null)
-            ?.flatMap { it.split(',') }
             ?.map { it.toInt() } ?: listOf()
     }
     private val purifyContents by lazy {
-        sPrefs.getString("customize_dynamic_keywords_content", null)
-            ?.split("|")?.filter { it.isNotBlank() } ?: listOf()
+        sPrefs.getStringSet("customize_dynamic_keyword_content", null) ?: setOf()
     }
     private val purifyUpNames by lazy {
-        sPrefs.getString("customize_dynamic_keywords_upname", null)
-            ?.split("|")?.filter { it.isNotBlank() } ?: listOf()
+        sPrefs.getStringSet("customize_dynamic_keyword_upname", null) ?: setOf()
     }
     private val purifyUidList by lazy {
-        sPrefs.getString("customize_dynamic_keywords_uid", null)
-            ?.split("|")?.mapNotNull { it.toLongOrNull() } ?: listOf()
+        sPrefs.getStringSet("customize_dynamic_keyword_uid", null)
+            ?.mapNotNull { it.toLongOrNull() } ?: listOf()
+    }
+    private val removeTopicOfAll by lazy {
+        sPrefs.getBoolean("customize_dynamic_all_rm_topic", false)
+    }
+    private val removeUpOfAll by lazy {
+        sPrefs.getBoolean("customize_dynamic_all_rm_up", false)
+    }
+    private val removeUpOfVideo by lazy {
+        sPrefs.getBoolean("customize_dynamic_video_rm_up", false)
+    }
+    private val preferVideoTab by lazy {
+        sPrefs.getBoolean("prefer_video_tab", false)
+    }
+    private val filterApplyToVideo by lazy {
+        sPrefs.getBoolean("filter_apply_to_video", false)
     }
 
+    private val needFilterDynamic = purifyTypes.isNotEmpty() || purifyContents.isNotEmpty()
+            || purifyUpNames.isNotEmpty() || purifyUidList.isNotEmpty()
+
     override fun startHook() {
-        if (purifyTypes.isEmpty() && purifyContents.isEmpty()
-            && purifyUpNames.isEmpty() && purifyUidList.isEmpty()
-        ) return
-
-        "com.bapis.bilibili.app.dynamic.v2.DynamicMoss".hookAfterMethod(
-            mClassLoader,
-            "dynAll",
-            "com.bapis.bilibili.app.dynamic.v2.DynAllReq"
-        ) { param ->
-            val dnyAllReply = param.result
-                ?: return@hookAfterMethod
-            val dynamicList = dnyAllReply.callMethod("getDynamicList")
-                ?: return@hookAfterMethod
-            val contentList = dynamicList.callMethodAs<List<*>?>("getListList")
-                ?: return@hookAfterMethod
-            val idxList = mutableSetOf<Int>()
-            contentList.forEachIndexed { idx, e ->
-                if (purifyTypes.isNotEmpty()) {
-                    val cardType = e?.callMethodAs<Int>("getCardTypeValue") ?: -1
-                    if (purifyTypes.contains(cardType)) {
-                        idxList.add(idx)
-                    }
-                }
-
-                val extend = e?.callMethod("getExtend")
-
-                if (purifyContents.isNotEmpty()) {
-                    val contentOrig = extend
-                        ?.callMethodAs<List<*>>("getOrigDescList")
-                        ?.map {
-                            it?.callMethodAs<String>("getOrigText") ?: ""
-                        }?.filter { it.isNotEmpty() }
-                        ?.joinToString(separator = "|") ?: ""
-                    if (contentOrig.isNotEmpty() && purifyContents.any { contentOrig.contains(it) }) {
-                        idxList.add(idx)
-                    }
-                }
-
-                if (purifyContents.isNotEmpty()) {
-                    val content = extend
-                        ?.callMethodAs<List<*>>("getDescList")
-                        ?.map {
-                            it?.callMethodAs<String>("getOrigText") ?: ""
-                        }?.filter { it.isNotEmpty() }
-                        ?.joinToString(separator = "|") ?: ""
-                    if (content.isNotEmpty() && purifyContents.any { content.contains(it) }) {
-                        idxList.add(idx)
-                    }
-                }
-
-                if (purifyUpNames.isNotEmpty()) {
-                    val origName = extend?.callMethodAs<String>("getOrigName") ?: ""
-                    if (origName.isNotEmpty() && purifyUpNames.any { origName == it }) {
-                        idxList.add(idx)
-                    }
-                }
-
-                if (purifyUidList.isNotEmpty()) {
-                    val uid = extend?.callMethodAs<Long>("getUid") ?: 0L
-                    if (uid > 0L && purifyUidList.any { uid == it }) {
-                        idxList.add(idx)
-                    }
+        val hidden = sPrefs.getBoolean("hidden", false)
+        if (hidden && (needFilterDynamic || removeTopicOfAll || removeUpOfAll)) {
+            "com.bapis.bilibili.app.dynamic.v2.DynamicMoss".hookAfterMethod(
+                mClassLoader,
+                "dynAll",
+                "com.bapis.bilibili.app.dynamic.v2.DynAllReq"
+            ) { param ->
+                param.result?.let {
+                    if (removeTopicOfAll)
+                        it.callMethod("clearTopicList")
+                    if (removeUpOfAll)
+                        it.callMethod("clearUpList")
+                    if (needFilterDynamic)
+                        filterDynamic(it)
                 }
             }
-            idxList.reversed().forEach {
-                dynamicList.callMethod("removeList", it)
+        }
+        if (hidden && ((filterApplyToVideo && needFilterDynamic) || removeUpOfVideo)) {
+            "com.bapis.bilibili.app.dynamic.v2.DynamicMoss".hookAfterMethod(
+                mClassLoader,
+                "dynVideo",
+                "com.bapis.bilibili.app.dynamic.v2.DynVideoReq"
+            ) { param ->
+                param.result?.let {
+                    if (removeUpOfVideo)
+                        it.callMethod("clearVideoUpList")
+                    if (filterApplyToVideo && needFilterDynamic)
+                        filterDynamic(it)
+                }
             }
+        }
+        if (hidden && preferVideoTab) {
+            "com.bapis.bilibili.app.dynamic.v1.DynamicMoss".hookAfterMethod(
+                mClassLoader,
+                "dynRed",
+                "com.bapis.bilibili.app.dynamic.v1.DynRedReq"
+            ) { param ->
+                param.result?.run {
+                    callMethod("setDefaultTab", "video")
+                }
+            }
+        }
+    }
+
+    private fun filterDynamic(reply: Any) {
+        val dynamicList = reply.callMethod("getDynamicList")
+            ?: return
+        val contentList = dynamicList.callMethodAs<List<*>?>("getListList")
+            ?: return
+        val idxList = mutableSetOf<Int>()
+        contentList.forEachIndexed { idx, e ->
+            if (purifyTypes.isNotEmpty()) {
+                val cardType = e?.callMethodAs("getCardTypeValue") ?: -1
+                if (purifyTypes.contains(cardType)) {
+                    idxList.add(idx)
+                }
+            }
+
+            if (purifyContents.isNotEmpty()) {
+                val modulesText = e?.callMethodAs<List<*>?>("getModulesList")
+                    ?.joinToString(separator = "") {
+                        it?.callMethod("getModuleDesc")
+                            ?.callMethodAs<String?>("getText") ?: ""
+                    } ?: ""
+                if (modulesText.isNotEmpty() && purifyContents.any { modulesText.contains(it) }) {
+                    idxList.add(idx)
+                }
+            }
+
+            val extend = e?.callMethod("getExtend")
+
+            if (purifyContents.isNotEmpty()) {
+                val contentOrig = extend
+                    ?.callMethodAs<List<*>?>("getOrigDescList")
+                    ?.joinToString(separator = "") {
+                        it?.callMethodAs<String?>("getOrigText") ?: ""
+                    } ?: ""
+                if (contentOrig.isNotEmpty() && purifyContents.any { contentOrig.contains(it) }) {
+                    idxList.add(idx)
+                }
+            }
+
+            if (purifyContents.isNotEmpty()) {
+                val content = extend
+                    ?.callMethodAs<List<*>?>("getDescList")
+                    ?.joinToString(separator = "") {
+                        it?.callMethodAs<String?>("getOrigText") ?: ""
+                    } ?: ""
+                if (content.isNotEmpty() && purifyContents.any { content.contains(it) }) {
+                    idxList.add(idx)
+                }
+            }
+
+            if (purifyUpNames.isNotEmpty()) {
+                val origName = extend?.callMethodAs("getOrigName") ?: ""
+                if (origName.isNotEmpty() && purifyUpNames.any { origName == it }) {
+                    idxList.add(idx)
+                }
+            }
+
+            if (purifyUidList.isNotEmpty()) {
+                val uid = extend?.callMethodAs("getUid") ?: 0L
+                if (uid > 0L && purifyUidList.any { uid == it }) {
+                    idxList.add(idx)
+                }
+            }
+        }
+        idxList.reversed().forEach {
+            dynamicList.callMethod("removeList", it)
         }
     }
 }
